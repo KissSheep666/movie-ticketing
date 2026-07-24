@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: movie-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_ADDR:nacos}:8848
+        namespace: movie-ticketing
+      config:
+        server-addr: ${NACOS_ADDR:nacos}:8848
+        namespace: movie-ticketing
+        file-extension: yml
+        shared-configs:
+          - data-id: common.yml
+            group: DEFAULT_GROUP
+            refresh: true
+
+server:
+  port: 8082
