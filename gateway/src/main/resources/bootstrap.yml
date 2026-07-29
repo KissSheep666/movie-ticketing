@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: gateway
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_ADDR:nacos}:8848
+        namespace: movie-ticketing
+      config:
+        server-addr: ${NACOS_ADDR:nacos}:8848
+        namespace: movie-ticketing
+        file-extension: yml
+        shared-configs:
+          - data-id: common.yml
+            group: DEFAULT_GROUP
+            refresh: true
+
+# JWT 密钥（默认值，线上在 Nacos 配置中心覆盖）
+jwt:
+  secret: movie-ticketing-secret-key-must-be-at-least-256-bits-long!
