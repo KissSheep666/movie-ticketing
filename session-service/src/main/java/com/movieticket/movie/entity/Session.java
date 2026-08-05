@@ -1,14 +1,11 @@
-package com.movieticket.session.entity;
+package com.movieticket.movie.entity;
 
 import com.baomidou.mybatisplus.annotation.*;
 import lombok.Data;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
-/**
- * 场次实体，映射 db_session 库的 session 表。
- * 一场电影 = 一个 session，包含放映时间、影厅、票价、座位统计。
- */
 @Data
 @TableName("session")
 public class Session {
@@ -25,6 +22,10 @@ public class Session {
     private Integer availableSeats; // 剩余可用座位数（锁座 -1，释放 +1）
     private Integer status;         // 1=即将开始，2=售票中，3=已结束，4=已取消
 
+
+    //创建时间,在见表世界直接自动进行插入
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
+
 }

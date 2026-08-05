@@ -1,6 +1,6 @@
 # 项目进度
 
-> 最后更新: 2026-07-29
+> 最后更新: 2026-07-30
 
 ---
 
@@ -1115,12 +1115,11 @@ public class Category {
 package com.movieticket.movie.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.movieticket.movie.entity.Movie;
 import org.apache.ibatis.annotations.Mapper;
 
 @Mapper
 public interface MovieMapper extends BaseMapper<Movie> {
-    // 复杂查询后续在此加方法
+  // 复杂查询后续在此加方法
 }
 ```
 
@@ -1161,7 +1160,6 @@ package com.movieticket.movie.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movieticket.movie.entity.Category;
-import com.movieticket.movie.entity.Movie;
 
 import java.util.List;
 
@@ -1170,21 +1168,21 @@ import java.util.List;
  */
 public interface MovieService {
 
-    /**
-     * 分页查询电影列表，支持按分类筛选。
-     * @param page       页码（从1开始）
-     * @param size       每页条数
-     * @param categoryId 分类ID（可选，null 则查全部）
-     * @param status     状态筛选（可选，null 则查全部）
-     * @return MyBatis-Plus Page 对象（含 total、pages、records）
-     */
-    Page<Movie> listByPage(int page, int size, Long categoryId, Integer status);
+  /**
+   * 分页查询电影列表，支持按分类筛选。
+   * @param page       页码（从1开始）
+   * @param size       每页条数
+   * @param categoryId 分类ID（可选，null 则查全部）
+   * @param status     状态筛选（可选，null 则查全部）
+   * @return MyBatis-Plus Page 对象（含 total、pages、records）
+   */
+  Page<Movie> listByPage(int page, int size, Long categoryId, Integer status);
 
-    /** 查询电影详情 */
-    Movie getById(Long id);
+  /** 查询电影详情 */
+  Movie getById(Long id);
 
-    /** 查询所有分类 */
-    List<Category> listCategories();
+  /** 查询所有分类 */
+  List<Category> listCategories();
 }
 ```
 
@@ -1204,7 +1202,6 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movieticket.common.exception.BizCodeEnum;
 import com.movieticket.common.exception.BizException;
 import com.movieticket.movie.entity.Category;
-import com.movieticket.movie.entity.Movie;
 import com.movieticket.movie.mapper.CategoryMapper;
 import com.movieticket.movie.mapper.MovieMapper;
 import com.movieticket.movie.service.MovieService;
@@ -1233,65 +1230,65 @@ import java.util.List;
 @RequiredArgsConstructor
 public class MovieServiceImpl implements MovieService {
 
-    private final MovieMapper movieMapper;
-    private final CategoryMapper categoryMapper;
+  private final MovieMapper movieMapper;
+  private final CategoryMapper categoryMapper;
 
-    /**
-     * 分页查询电影列表。
-     *
-     * 为什么分页：
-     *   电影可能有几百部，一次全返回 → 前端渲染慢 + 数据库压力大 + 传输带宽浪费
-     *   分页只取当前页的 10~20 条，用户体验好
-     *
-     * 为什么用 orderByDesc(Movie::getRating)：
-     *   用户打开电影列表，默认看评分最高的，符合用户预期
-     *
-     * @param page       页码（1-based，MyBatis-Plus 内部自动转 OFFSET）
-     * @param size       每页条数
-     * @param categoryId 分类ID（null = 全部分类）
-     * @param status     状态筛选（null = 全部状态，常用于"仅看热映中"）
-     */
-    @Override
-    public Page<Movie> listByPage(int page, int size, Long categoryId, Integer status) {
-        // MyBatis-Plus 分页对象，构造后传给 selectPage，自动做 COUNT + LIMIT
-        Page<Movie> pageParam = new Page<>(page, size);
+  /**
+   * 分页查询电影列表。
+   *
+   * 为什么分页：
+   *   电影可能有几百部，一次全返回 → 前端渲染慢 + 数据库压力大 + 传输带宽浪费
+   *   分页只取当前页的 10~20 条，用户体验好
+   *
+   * 为什么用 orderByDesc(Movie::getRating)：
+   *   用户打开电影列表，默认看评分最高的，符合用户预期
+   *
+   * @param page       页码（1-based，MyBatis-Plus 内部自动转 OFFSET）
+   * @param size       每页条数
+   * @param categoryId 分类ID（null = 全部分类）
+   * @param status     状态筛选（null = 全部状态，常用于"仅看热映中"）
+   */
+  @Override
+  public Page<Movie> listByPage(int page, int size, Long categoryId, Integer status) {
+    // MyBatis-Plus 分页对象，构造后传给 selectPage，自动做 COUNT + LIMIT
+    Page<Movie> pageParam = new Page<>(page, size);
 
-        // 动态条件：传了才加 WHERE，不传则查全部
-        LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
-        if (categoryId != null) {
-            wrapper.eq(Movie::getCategoryId, categoryId);  // WHERE category_id = ?
-        }
-        if (status != null) {
-            wrapper.eq(Movie::getStatus, status);           // WHERE status = ?
-        }
-        wrapper.orderByDesc(Movie::getRating);  // ORDER BY rating DESC
-
-        // selectPage：MyBatis-Plus 自动执行 COUNT 查总数 + 查当前页数据
-        movieMapper.selectPage(pageParam, wrapper);
-        log.info("查询电影列表: page={}, size={}, total={}", page, size, pageParam.getTotal());
-        return pageParam;
+    // 动态条件：传了才加 WHERE，不传则查全部
+    LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
+    if (categoryId != null) {
+      wrapper.eq(Movie::getCategoryId, categoryId);  // WHERE category_id = ?
     }
-
-    /**
-     * 查电影详情。查不到抛 BizException → GlobalExceptionHandler → Result.error()。
-     */
-    @Override
-    public Movie getById(Long id) {
-        Movie movie = movieMapper.selectById(id);
-        if (movie == null) {
-            throw new BizException(BizCodeEnum.MOVIE_NOT_FOUND);
-        }
-        return movie;
+    if (status != null) {
+      wrapper.eq(Movie::getStatus, status);           // WHERE status = ?
     }
+    wrapper.orderByDesc(Movie::getRating);  // ORDER BY rating DESC
 
-    /**
-     * 查全部分类，用于前端筛选栏。
-     * 分类数量少（通常 < 20），不需要分页，全返回。
-     */
-    @Override
-    public List<Category> listCategories() {
-        return categoryMapper.selectList(null);  // null = SELECT * FROM category
+    // selectPage：MyBatis-Plus 自动执行 COUNT 查总数 + 查当前页数据
+    movieMapper.selectPage(pageParam, wrapper);
+    log.info("查询电影列表: page={}, size={}, total={}", page, size, pageParam.getTotal());
+    return pageParam;
+  }
+
+  /**
+   * 查电影详情。查不到抛 BizException → GlobalExceptionHandler → Result.error()。
+   */
+  @Override
+  public Movie getById(Long id) {
+    Movie movie = movieMapper.selectById(id);
+    if (movie == null) {
+      throw new BizException(BizCodeEnum.MOVIE_NOT_FOUND);
     }
+    return movie;
+  }
+
+  /**
+   * 查全部分类，用于前端筛选栏。
+   * 分类数量少（通常 < 20），不需要分页，全返回。
+   */
+  @Override
+  public List<Category> listCategories() {
+    return categoryMapper.selectList(null);  // null = SELECT * FROM category
+  }
 }
 ```
 
@@ -1316,7 +1313,6 @@ package com.movieticket.movie.controller;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movieticket.common.result.Result;
 import com.movieticket.movie.entity.Category;
-import com.movieticket.movie.entity.Movie;
 import com.movieticket.movie.service.MovieService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -1336,37 +1332,37 @@ import java.util.List;
 @RequiredArgsConstructor
 public class MovieController {
 
-    private final MovieService movieService;
+  private final MovieService movieService;
 
-    /**
-     * 分页查询电影列表。
-     * 请求示例：GET /api/movie/list?page=1&size=10&categoryId=3&status=2
-     *
-     * 为什么 categoryId / status 是 required=false：
-     *   首次进页面不带筛选条件，查全部；用户点分类/状态后才传参数
-     */
-    @GetMapping("/list")
-    public Result<Page<Movie>> list(@RequestParam(defaultValue = "1") int page,
-                                     @RequestParam(defaultValue = "10") int size,
-                                     @RequestParam(required = false) Long categoryId,
-                                     @RequestParam(required = false) Integer status) {
-        Page<Movie> result = movieService.listByPage(page, size, categoryId, status);
-        return Result.success(result);
-    }
+  /**
+   * 分页查询电影列表。
+   * 请求示例：GET /api/movie/list?page=1&size=10&categoryId=3&status=2
+   *
+   * 为什么 categoryId / status 是 required=false：
+   *   首次进页面不带筛选条件，查全部；用户点分类/状态后才传参数
+   */
+  @GetMapping("/list")
+  public Result<Page<Movie>> list(@RequestParam(defaultValue = "1") int page,
+                                  @RequestParam(defaultValue = "10") int size,
+                                  @RequestParam(required = false) Long categoryId,
+                                  @RequestParam(required = false) Integer status) {
+    Page<Movie> result = movieService.listByPage(page, size, categoryId, status);
+    return Result.success(result);
+  }
 
-    /** 电影详情 */
-    @GetMapping("/{id}")
-    public Result<Movie> getById(@PathVariable Long id) {
-        Movie movie = movieService.getById(id);
-        return Result.success(movie);
-    }
+  /** 电影详情 */
+  @GetMapping("/{id}")
+  public Result<Movie> getById(@PathVariable Long id) {
+    Movie movie = movieService.getById(id);
+    return Result.success(movie);
+  }
 
-    /** 分类列表，前端筛选栏"动作/喜剧/科幻..."下拉用 */
-    @GetMapping("/category/list")
-    public Result<List<Category>> listCategories() {
-        List<Category> categories = movieService.listCategories();
-        return Result.success(categories);
-    }
+  /** 分类列表，前端筛选栏"动作/喜剧/科幻..."下拉用 */
+  @GetMapping("/category/list")
+  public Result<List<Category>> listCategories() {
+    List<Category> categories = movieService.listCategories();
+    return Result.success(categories);
+  }
 }
 ```
 
@@ -3951,4 +3947,89 @@ curl -X POST -H "Authorization: Bearer <token>" \
 # 支付（需 token）
 curl -X POST -H "Authorization: Bearer <token>" \
   "http://localhost:8080/api/order/pay?orderId=1"
+```
+
+---
+
+## 九、后续升级计划（待做）
+
+### Phase 8：Elasticsearch 搜索集成
+
+**目标**：电影搜索支持中文分词全文检索（按电影名、导演、演员、描述搜索），替代当前纯 DB `LIKE` 查询。
+
+**改动清单**：
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `docker-compose.yml` | ✏️ 加 ES + Kibana 容器 | `elasticsearch:8.15.0`（9200端口）、`kibana:8.15.0`（5601端口） |
+| `pom.xml`（父） | ✏️ 加依赖管理 | `spring-boot-starter-data-elasticsearch` |
+| `movie-service/pom.xml` | ✏️ 加依赖 | 同上 |
+| `movie-service/.../document/MovieDocument.java` | ➕ 新建 | ES 文档模型，映射电影字段（name/director/cast/description 用 IK 中文分词） |
+| `movie-service/.../repository/MovieSearchRepository.java` | ➕ 新建 | 继承 `ElasticsearchRepository`，多字段搜索 + 高亮 |
+| `movie-service/.../service/MovieService.java` | ✏️ 加方法 | `search(keyword, page, size)` — ES 查询代替 DB |
+| `movie-service/.../controller/MovieController.java` | ✏️ 加接口 | `GET /api/movie/search?q=吴京` |
+| `movie-service/.../bootstrap.yml` | ✏️ 加配置 | `spring.elasticsearch.uris` |
+
+**数据同步**：XXL-Job 定时全量同步 MySQL → ES（每小时一次），简单可靠。
+
+---
+
+### Phase 9：Kubernetes 容器编排
+
+**目标**：把 docker-compose 单机部署迁移到 K8s 集群，具备滚动更新、自动重启、水平扩容能力。
+
+**架构决策**：保留 Nacos（配置中心热更新不可替代），注册发现后续可切 K8s DNS。
+
+**改动清单**：
+
+```
+k8s/                            # 新建目录，约 25 个 YAML 文件
+├── namespace.yaml              # movie-ticketing
+├── secrets.yaml                # mysql密码、jwt密钥
+├── mysql/
+│   ├── statefulset.yaml        # StatefulSet + PVC
+│   └── service.yaml            # ClusterIP:3306
+├── redis/
+│   ├── statefulset.yaml
+│   ├── service.yaml            # ClusterIP:6379
+│   └── pvc.yaml
+├── nacos/
+│   ├── statefulset.yaml
+│   └── service.yaml            # ClusterIP:8848
+├── xxl-job/
+│   ├── deployment.yaml
+│   └── service.yaml            # ClusterIP:8080
+├── elasticsearch/
+│   ├── statefulset.yaml
+│   ├── service.yaml            # ClusterIP:9200
+│   └── pvc.yaml
+├── gateway/
+│   ├── deployment.yaml         # replicas: 2
+│   └── service.yaml
+├── user-service/
+│   ├── deployment.yaml
+│   └── service.yaml
+├── movie-service/
+│   ├── deployment.yaml
+│   └── service.yaml
+├── session-service/
+│   ├── deployment.yaml
+│   └── service.yaml
+├── order-service/
+│   ├── deployment.yaml
+│   └── service.yaml
+└── ingress.yaml                # 对外暴露 Gateway
+```
+
+**每个服务额外加**：`spring-boot-starter-actuator` 依赖（提供 `/actuator/health` 探针端点）。
+
+---
+
+### K8s vs Nacos 一句话理解
+
+```
+Nacos = 应用层服务发现（Spring Cloud 体系内）
+K8s   = 基础设施层服务发现（DNS 解析，所有语言通用）
+
+两者都管"谁在哪儿"，但 Nacos 的配置中心热更新是 K8s ConfigMap 做不到的。
 ```
