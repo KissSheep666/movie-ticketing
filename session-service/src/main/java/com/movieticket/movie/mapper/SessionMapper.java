@@ -21,4 +21,6 @@ public interface SessionMapper extends BaseMapper<Session> {
      *             "WHERE id = #{sessionId} AND available_seats + #{delta} >= 0")
      */
     int updateAvailableSeats(@Param("sessionId") Long sessionId, @Param("delta") int delta);
+
+    int releaseSeat();
 }
