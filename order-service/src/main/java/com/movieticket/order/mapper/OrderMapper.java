@@ -11,7 +11,7 @@ import org.springframework.core.annotation.Order;
 import java.util.List;
 
 @Mapper
-public interface OrderMapper extends BaseMapper<Order> {
+public interface OrderMapper extends BaseMapper<Orders> {
     /**
      * 查询已经过期的待支付订单 XXL-Job 定时查询
      */

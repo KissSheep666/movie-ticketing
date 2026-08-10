@@ -1,13 +1,16 @@
-package com.movieticket.order.client;
+package com.movieticket.order.client.fallback;
 
 import com.movieticket.common.result.Result;
+import com.movieticket.order.client.SessionFeignClient;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
 
 @Slf4j
-public class SessionFeignClientFallBack implements SessionFeignClient{
+@Component
+public class SessionFeignClientFallBack implements SessionFeignClient {
     @Override
     public Result<Map<String, Object>> getSessionById(Long id) {
         log.warn("SessionFeignClient 降级: getSessionById({})", id);

@@ -1,12 +1,15 @@
-package com.movieticket.order.client;
+package com.movieticket.order.client.fallback;
 
 import com.movieticket.common.result.Result;
+import com.movieticket.order.client.UserFeignClient;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
 @Slf4j
-public class UserClientFallback implements UserFeignClient{
+@Component
+public class UserClientFallback implements UserFeignClient {
     @Override
     public Result<Map<String, Object>> getUserById(Long id) {
         log.warn("UserFeignClient 降级: getUserById({})", id);

@@ -9,8 +9,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 
 import java.util.List;
 import java.util.Map;
+import com.movieticket.order.client.fallback.SessionFeignClientFallBack;
 
-@FeignClient(name = "session-service" , fallback = SessionFeignClient.class)
+@FeignClient(name = "session-service", fallback = SessionFeignClientFallBack.class)
 public interface SessionFeignClient {
 
     //查询场次详情
