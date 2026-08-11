@@ -14,6 +14,10 @@ spring:
           - data-id: common.yml
             group: DEFAULT_GROUP
             refresh: true
+    sentinel:
+      transport:
+        dashboard: sentinel-dashboard:8858
+      eager: true
 
 server:
   port: 8083

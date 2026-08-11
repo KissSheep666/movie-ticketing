@@ -95,6 +95,15 @@ services:
     networks:
       - movie-net
 
+
+  sentinel-dashboard:
+    image: bladex/sentinel-dashboard:1.8.6
+    container_name: mt-sentinel
+    ports:
+      - "8089:8858"
+    networks:
+      - movie-net
+
   user-service:
     build: ./user-service
     container_name: mt-user-service
@@ -164,6 +173,9 @@ services:
         condition: service_started
     networks:
       - movie-net
+
+
+
 
 # ============================================
 # 卷 & 网络

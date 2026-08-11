@@ -3953,24 +3953,443 @@ curl -X POST -H "Authorization: Bearer <token>" \
 
 ## 九、后续升级计划（待做）
 
-### Phase 8：Elasticsearch 搜索集成
+### Phase 8：Elasticsearch 搜索集成（详细步骤）
 
-**目标**：电影搜索支持中文分词全文检索（按电影名、导演、演员、描述搜索），替代当前纯 DB `LIKE` 查询。
+**目标**：movie-service 增加电影中文全文搜索（按电影名/导演/演员/简介搜索，支持分类、状态过滤）。MySQL 仍是事实源，`/api/movie/list`、`/api/movie/{id}` 不动，ES 只服务 `/api/movie/search`。
 
-**改动清单**：
+**技术决策**：smartcn 内置中文分词（ES 默认自带，零插件）；ES 8.11.1（对齐 Boot 3.2.7 的 spring-data-elasticsearch 5.2）；Kibana 可视化；XXL-Job 每小时全量同步 MySQL→ES。
 
-| 文件 | 操作 | 说明 |
-|------|------|------|
-| `docker-compose.yml` | ✏️ 加 ES + Kibana 容器 | `elasticsearch:8.15.0`（9200端口）、`kibana:8.15.0`（5601端口） |
-| `pom.xml`（父） | ✏️ 加依赖管理 | `spring-boot-starter-data-elasticsearch` |
-| `movie-service/pom.xml` | ✏️ 加依赖 | 同上 |
-| `movie-service/.../document/MovieDocument.java` | ➕ 新建 | ES 文档模型，映射电影字段（name/director/cast/description 用 IK 中文分词） |
-| `movie-service/.../repository/MovieSearchRepository.java` | ➕ 新建 | 继承 `ElasticsearchRepository`，多字段搜索 + 高亮 |
-| `movie-service/.../service/MovieService.java` | ✏️ 加方法 | `search(keyword, page, size)` — ES 查询代替 DB |
-| `movie-service/.../controller/MovieController.java` | ✏️ 加接口 | `GET /api/movie/search?q=吴京` |
-| `movie-service/.../bootstrap.yml` | ✏️ 加配置 | `spring.elasticsearch.uris` |
+#### 步骤 1：docker-compose.yml 加 ES + Kibana
 
-**数据同步**：XXL-Job 定时全量同步 MySQL → ES（每小时一次），简单可靠。
+在 `xxl-job-admin` 服务后面追加两个服务（沿用现有模式：`container_name: mt-*`、宿主端口重映射、`movie-net`、healthcheck）：
+
+```yaml
+  elasticsearch:
+    image: elasticsearch:8.11.1
+    container_name: mt-elasticsearch
+    ports:
+      - "19200:9200"            # 宿主 19200 → 容器 9200（避开本机 9200）
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false   # 演示关安全，否则要 https+账号密码
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - movie-net
+
+  kibana:
+    image: kibana:8.11.1
+    container_name: mt-kibana
+    ports:
+      - "15601:5601"            # 宿主 15601 → 容器 5601
+    environment:
+      - ELASTICSEARCH_HOSTS=http://mt-elasticsearch:9200
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - movie-net
+```
+
+文件底部 `volumes:` 段加一行 `es-data:`。给 `movie-service` 的 `depends_on` 加 `elasticsearch: condition: service_started`（不硬等 healthy，ES 挂了 movie-service 还能跑 MySQL 的 list/detail）。
+
+> ES 镜像较大（~500MB），走 Clash 代理拉取；Docker Desktop 已处理 vm.max_map_count。smartcn 是 ES 默认发行版自带的，不用装插件。
+
+#### 步骤 2：movie-service/pom.xml 加两个依赖
+
+在 `<dependencies>` 里加：
+
+```xml
+        <!-- Elasticsearch 搜索 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-elasticsearch</artifactId>
+        </dependency>
+
+        <!-- XXL-Job 定时同步 MySQL → ES -->
+        <dependency>
+            <groupId>com.xuxueli</groupId>
+            <artifactId>xxl-job-core</artifactId>
+        </dependency>
+```
+
+版本都不用写：ES starter 由 Boot 3.2.7 BOM 管理，xxl-job 由根 pom 的 dependencyManagement 管理。**根 pom 不用改**。
+
+#### 步骤 3：Nacos 配置（movie-service.yml）加两个块
+
+在 Nacos `movie-ticketing` 命名空间的 `movie-service.yml` 配置里追加：
+
+```yaml
+spring:
+  elasticsearch:
+    uris: http://mt-elasticsearch:9200
+
+xxl:
+  job:
+    admin:
+      addresses: http://xxl-job-admin:8080/xxl-job-admin
+    accessToken: default_token     # 必须与 compose 里 xxl-job-admin 的 --xxl.job.accessToken 一致
+    executor:
+      appname: movie-service
+      port: 9999
+      logpath: /data/applogs/xxl-job/jobhandler
+      logretentiondays: 30
+```
+
+> ⚠️ 先看 order-service 的 Nacos 配置里 `xxl.job.executor.port` 用的几号端口，movie-service 避开它（比如 order 用 9999，movie 用 9998）。executor 参数镜像 order-service 的写法即可。
+
+#### 步骤 4：新增 Java 文件
+
+**① `document/MovieDocument.java`**（新建 `document` 包）：
+
+```java
+package com.movieticket.movie.document;
+
+import lombok.Data;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.elasticsearch.annotations.Document;
+import org.springframework.data.elasticsearch.annotations.Field;
+import org.springframework.data.elasticsearch.annotations.FieldType;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * ES 电影索引文档。
+ * name/director/cast/description 用 smartcn 内置中文分词（ES 默认自带，零插件）
+ */
+@Data
+@Document(indexName = "movie", createIndex = true)
+public class MovieDocument {
+
+    @Id
+    private Long id;
+
+    @Field(type = FieldType.Text, analyzer = "smartcn", searchAnalyzer = "smartcn")
+    private String name;
+
+    @Field(type = FieldType.Text, analyzer = "smartcn", searchAnalyzer = "smartcn")
+    private String director;
+
+    @Field(type = FieldType.Text, analyzer = "smartcn", searchAnalyzer = "smartcn")
+    private String cast;
+
+    @Field(type = FieldType.Text, analyzer = "smartcn", searchAnalyzer = "smartcn")
+    private String description;
+
+    @Field(type = FieldType.Keyword)
+    private Long categoryId;
+
+    @Field(type = FieldType.Keyword)
+    private String categoryName;      // 反范式冗余分类名，前端展示免查库
+
+    @Field(type = FieldType.Integer)
+    private Integer duration;
+
+    @Field(type = FieldType.Keyword)
+    private String posterUrl;
+
+    @Field(type = FieldType.Double)
+    private BigDecimal rating;
+
+    @Field(type = FieldType.Integer)
+    private Integer status;           // 1=即将上映 2=热映中 3=已下映
+
+    @Field(type = FieldType.Date)
+    private LocalDateTime createTime;
+}
+```
+
+**② `repository/MovieSearchRepository.java`**（新建 `repository` 包）：
+
+```java
+package com.movieticket.movie.repository;
+
+import com.movieticket.movie.document.MovieDocument;
+import org.springframework.data.elasticsearch.repository.ElasticsearchRepository;
+
+public interface MovieSearchRepository extends ElasticsearchRepository<MovieDocument, Long> {
+}
+```
+
+**③ `dto/SearchResult.java`**（新建 `dto` 包）：
+
+```java
+package com.movieticket.movie.dto;
+
+import com.movieticket.movie.document.MovieDocument;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.util.List;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class SearchResult {
+    private long total;                    // 命中总数
+    private List<MovieDocument> list;      // 当前页数据
+}
+```
+
+**④ `job/MovieSearchSyncJob.java`**（新建 `job` 包，复用 order-service OrderTimeoutJob 的写法）：
+
+```java
+package com.movieticket.movie.job;
+
+import com.movieticket.movie.document.MovieDocument;
+import com.movieticket.movie.entity.Category;
+import com.movieticket.movie.entity.Movie;
+import com.movieticket.movie.mapper.CategoryMapper;
+import com.movieticket.movie.mapper.MovieMapper;
+import com.movieticket.movie.repository.MovieSearchRepository;
+import com.xxl.job.core.handler.annotation.XxlJob;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.IndexOperations;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+/**
+ * ES 电影索引全量同步：MySQL → ES。
+ * XXL-Job 调度每小时一次（控制台注册 jobHandler=movieSearchSyncJob）。
+ * 全量重建：删索引 → 建索引（带 smartcn mapping）→ 写入
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class MovieSearchSyncJob {
+
+    private final MovieMapper movieMapper;
+    private final CategoryMapper categoryMapper;
+    private final MovieSearchRepository searchRepository;
+    private final ElasticsearchOperations operations;
+
+    @XxlJob("movieSearchSyncJob")
+    public void sync() {
+        log.info("ES 电影索引同步任务开始");
+
+        // 1. 重建索引（删旧的再建，保证 mapping/analyzer 最新）
+        IndexOperations indexOps = operations.indexOps(MovieDocument.class);
+        if (indexOps.exists()) {
+            indexOps.delete();
+        }
+        indexOps.create();
+
+        // 2. 查 MySQL 全量数据，并映射分类名
+        List<Movie> movies = movieMapper.selectList(null);
+        Map<Long, String> categoryNameMap = categoryMapper.selectList(null).stream()
+                .collect(Collectors.toMap(Category::getId, Category::getName));
+
+        // 3. 转文档 + 批量写入
+        List<MovieDocument> docs = movies.stream()
+                .map(m -> toDoc(m, categoryNameMap.get(m.getCategoryId())))
+                .toList();
+        searchRepository.saveAll(docs);
+
+        log.info("ES 电影索引同步完成，共 {} 条", docs.size());
+    }
+
+    private MovieDocument toDoc(Movie m, String categoryName) {
+        MovieDocument doc = new MovieDocument();
+        doc.setId(m.getId());
+        doc.setName(m.getName());
+        doc.setDirector(m.getDirector());
+        doc.setCast(m.getCast());
+        doc.setDescription(m.getDescription());
+        doc.setCategoryId(m.getCategoryId());
+        doc.setCategoryName(categoryName);
+        doc.setDuration(m.getDuration());
+        doc.setPosterUrl(m.getPosterUrl());
+        doc.setRating(m.getRating());
+        doc.setStatus(m.getStatus());
+        doc.setCreateTime(m.getCreateTime());
+        return doc;
+    }
+}
+```
+
+#### 步骤 5：改已有 Java 文件
+
+**① `service/MovieService.java`** — 加方法 + import：
+
+```java
+import com.movieticket.movie.dto.SearchResult;
+```
+
+```java
+    /**
+     * ES 全文搜索：按电影名/导演/演员/简介搜索，支持分类和状态过滤
+     */
+    SearchResult search(String keyword, Long categoryId, Integer status, int page, int size);
+```
+
+**② `service/impl/MovieServiceImpl.java`** — 类上加 `@Slf4j`；注入 `ElasticsearchOperations`；加 search 实现。
+
+类注解和字段（`@RequiredArgsConstructor` 自动构造注入）：
+
+```java
+@Slf4j
+@Service
+public class MovieServiceImpl implements MovieService {
+
+    private final MovieMapper movieMapper;
+
+    private final CategoryMapper categoryMapper;
+
+    private final ElasticsearchOperations operations;   // ← 新增
+```
+
+新增 import（加在现有 import 里）：
+
+```java
+import co.elastic.clients.elasticsearch._types.Highlight;
+import co.elastic.clients.elasticsearch._types.query_dsl.BoolQuery;
+import co.elastic.clients.elasticsearch._types.query_dsl.Query;
+import com.movieticket.movie.document.MovieDocument;
+import com.movieticket.movie.dto.SearchResult;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.elasticsearch.client.elc.NativeQuery;
+import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.SearchHit;
+import org.springframework.data.elasticsearch.core.SearchHits;
+```
+
+新增方法：
+
+```java
+    @Override
+    public SearchResult search(String keyword, Long categoryId, Integer status, int page, int size) {
+        // 1. 关键词 → multi_match 多字段搜索（name 加权 ^2）
+        Query keywordQuery;
+        if (keyword == null || keyword.isBlank()) {
+            keywordQuery = Query.of(q -> q.matchAll(m -> m));
+        } else {
+            keywordQuery = Query.of(q -> q.multiMatch(m -> m
+                    .query(keyword)
+                    .fields(List.of("name^2", "director", "cast", "description"))));
+        }
+
+        // 2. 过滤条件（分类/状态）+ 高亮 name
+        BoolQuery.Builder bool = new BoolQuery.Builder();
+        bool.must(keywordQuery);
+        if (categoryId != null) {
+            bool.filter(f -> f.term(t -> t.field("categoryId").value(categoryId)));
+        }
+        if (status != null && status > 0) {
+            bool.filter(f -> f.term(t -> t.field("status").value(status)));
+        }
+
+        Highlight highlight = Highlight.of(h -> h
+                .fields("name", f -> f.preTags("<em>").postTags("</em>")));
+
+        NativeQuery query = NativeQuery.builder()
+                .withQuery(q -> q.bool(bool.build()))
+                .withPageable(PageRequest.of(Math.max(page - 1, 0), size))
+                .withHighlight(highlight)
+                .build();
+
+        // 3. 执行（ES 挂了不拖垮服务，降级返回空结果）
+        SearchHits<MovieDocument> searchHits;
+        try {
+            searchHits = operations.search(query, MovieDocument.class);
+        } catch (Exception e) {
+            log.error("ES 搜索失败，降级返回空结果", e);
+            return new SearchResult(0, List.of());
+        }
+
+        List<MovieDocument> list = searchHits.stream()
+                .map(SearchHit::getContent)
+                .toList();
+        return new SearchResult(searchHits.getTotalHits(), list);
+    }
+```
+
+**③ `controller/MovieController.java`** — 加接口 + import：
+
+```java
+import com.movieticket.movie.dto.SearchResult;
+```
+
+```java
+    @GetMapping("/search")
+    public Result<SearchResult> search(
+            @RequestParam(required = false) String q,
+            @RequestParam(required = false) Long categoryId,
+            @RequestParam(required = false) Integer status,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int size
+    ) {
+        return Result.success(movieService.search(q, categoryId, status, page, size));
+    }
+```
+
+> `/search` 是字面路径，Spring MVC 匹配优先级高于 `/{id}`，不会被吞掉。
+
+**④ `gateway/.../filter/AuthFilter.java`** — 白名单加一行（L39-44 的 `List.of(...)` 里）：
+
+```java
+        "/api/movie/search"     // ES 搜索（可浏览不登录）
+```
+
+#### 步骤 6：xxl-job-admin 控制台注册任务
+
+1. 浏览器开 `http://localhost:8088/xxl-job-admin`（默认账号 admin / 123456）
+2. movie-service 起来后会自动注册执行器：**执行器管理** 里应出现 `movie-service`（appname）
+3. **任务管理 → 新增任务**：
+   - 执行器：movie-service
+   - JobHandler：`movieSearchSyncJob`（与 @XxlJob 名一致）
+   - 调度类型：CRON，填 `0 0 * * * *`（每小时）
+   - 运行模式：BEAN
+   - 保存后点「操作 → 执行一次」，把 20 条初始数据建进索引
+
+#### 步骤 7：重建重启 + 验证
+
+```bash
+# 拉 ES/Kibana 镜像并启动
+docker compose up -d elasticsearch kibana
+
+# 重建 movie-service 并重启（依赖已加）
+mvn -q clean -DskipTests -pl movie-service -am package
+docker compose up -d --build movie-service
+```
+
+**验证**：
+
+```bash
+# ① ES 健康
+curl http://localhost:19200/_cluster/health          # status 应为 green/yellow
+
+# ② 手动触发同步后，索引应有 20 条
+curl -X POST "http://localhost:19200/movie/_search" \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}}}'                   # hits.total == 20
+
+# ③ 搜索接口（网关，白名单免登录）
+curl "http://localhost:8080/api/movie/search?q=吴京"
+curl "http://localhost:8080/api/movie/search?q=流浪"
+```
+
+- Kibana：浏览器 `http://localhost:15601` → Dev Tools → `POST /movie/_analyze { "field": "name", "text": "流浪地球" }` 看 smartcn 切出的中文词元
+- 持久化：重启 movie-service 后搜索仍正常（索引在 es-data 卷里）；每小时 xxl-job 自动全量重建
+
+**踩坑提示**：
+- ES 日志查问题：`docker logs mt-elasticsearch`
+- movie-service 起不来先看 Nacos 配置是否生效：容器缓存目录 `/root/nacos/config/snapshot-tenant/movie-ticketing/DEFAULT_GROUP/`
+- 若 repository 没被扫描到（`No qualifying bean of type MovieSearchRepository`），在 `MovieApplication` 上加 `@EnableElasticsearchRepositories`
 
 ---
 

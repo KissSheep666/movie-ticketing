@@ -26,7 +26,7 @@ public class SessionServiceImpl implements SessionService {
 
     private final SessionMapper sessionMapper;
     private final SeatMapper seatMapper;
-    private final RedisTemplate redisTemplate;
+    private final RedisTemplate<Object, Object> redisTemplate;
 
 
     //定义常量参数

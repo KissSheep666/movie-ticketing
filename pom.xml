@@ -161,5 +161,15 @@
                 </plugin>
             </plugins>
         </pluginManagement>
+        <plugins>
+            <!-- 保留参数名，Spring MVC 才能按名称绑定 @PathVariable/@RequestParam -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+        </plugins>
     </build>
 </project>
