@@ -3963,6 +3963,8 @@ curl -X POST -H "Authorization: Bearer <token>" \
 
 在 `xxl-job-admin` 服务后面追加两个服务（沿用现有模式：`container_name: mt-*`、宿主端口重映射、`movie-net`、healthcheck）：
 
+//在docker-compose.yml中完成对搜索集成项目的配置
+
 ```yaml
   elasticsearch:
     image: elasticsearch:8.11.1
@@ -4072,6 +4074,7 @@ public class MovieDocument {
     @Id
     private Long id;
 
+    //定义索引规则
     @Field(type = FieldType.Text, analyzer = "smartcn", searchAnalyzer = "smartcn")
     private String name;
 
@@ -4452,3 +4455,262 @@ K8s   = 基础设施层服务发现（DNS 解析，所有语言通用）
 
 两者都管"谁在哪儿"，但 Nacos 的配置中心热更新是 K8s ConfigMap 做不到的。
 ```
+
+---
+
+## 十一、待修复清单（主链路修复）
+
+> 生成时间：2026-09-14
+> 来源：对工作区源码做的一次完整核查（逐文件读 + 全项目 grep + `mvn clean compile` 实测）
+
+### 11.0 先更正本文档的一处失实标注
+
+**本文档 Phase 2/3/5/6 标注的「已编写并编译通过」不成立。**
+
+实测 `mvn clean compile`：**gateway 模块 FAILURE，后面 user-service / movie-service / session-service / order-service 四个模块全部 SKIPPED**。也就是说这套代码从来没有完整编译过，更没有端到端跑通过一次。
+
+代码体量是够的（6 模块、45 个 Java 文件），但主链路（登录 → 网关鉴权 → 锁座 → 下单 → 支付）目前**每一环都有必现的运行期错误**。
+
+因此 Phase 7 收尾清单里的「全链路联调」「故障演练」「超时释放验收」**现在一步都执行不了**。正确顺序是先修通主链路，再回头做 Phase 7 收尾 —— 下面的批次 0~4 就是这个顺序。
+
+---
+
+### 批次 0 — 让项目能编译（4 处，必须最先做）
+
+| # | 文件:行 | 问题 | 思路 |
+|---|---|---|---|
+| 0.1 | `gateway/.../filter/AuthFilter.java:20` | `import java.awt.image.DataBuffer;` 引成了 AWT 图片类 | 换成 `org.springframework.core.io.buffer.DataBuffer`。连带 `:147` 的强转、`:149` 的 `Publisher` 丑强转都能删掉，恢复成 `response.writeWith(Mono.just(buffer))` |
+| 0.2 | `movie-service/.../service/impl/MovieServiceImpl.java:80` | `public SearchResult search(...){\` 行尾有个反斜杠，方法体没闭合 | 这方法还没写完。要么先整个删掉（连同 `:8`/`:16` 的 `AlgorithmParameterGenerator`、`javax.naming.directory.SearchResult` 两个无用 import），要么按 Phase 8 的思路写完。**建议先删**，别让它挡着编译 |
+| 0.3 | `user-service/.../service/impl/UserServiceImpl.java:12` | `import org.bouncycastle.crypto.Digest;` —— 全项目 pom 里没有任何 bouncycastle 依赖（grep 零命中） | 这个 import 没被使用，直接删掉即可 |
+| 0.4 | `order-service/src/main/java/OrderApplication.java` | 文件在 `src/main/java/` 根目录、**没有 package 声明**（默认包）。能编译但结构错 | 挪到 `src/main/java/com/movieticket/order/OrderApplication.java`，补 `package com.movieticket.order;` |
+
+**验证**：`mvn clean compile` 全绿。
+
+---
+
+### 批次 1 — 让服务能起来
+
+#### 1.1 session-service 启动会直接失败
+
+`session-service/.../client/MovieFeignClientFallback.java:10` 缺 `@Component`。`@FeignClient(fallback = ...)` 构造时要**从容器里取** fallback 实例，取不到就抛 `NoSuchBeanDefinitionException` 启动失败。对比 order-service 的两个 fallback 都标了 `@Component` —— 补上即可。
+
+顺带两处（同一个文件）：
+
+- `MovieFeignClient.java:18` 写的是 `name = "session-service"`，但它调的是 `/api/movie/{id}` —— 指向了自己。应改成 `movie-service`
+- 这个 client 在整个 session-service 里从没被注入使用过，是死代码。要么接进 `SessionServiceImpl`（校验 movieId 存在），要么先删
+
+#### 1.2 `xxl_job` 数据库不存在 → xxl-job-admin 起不来
+
+- `docker-compose.yml:63` 定义了 `xxl-job-admin`，`:17` 把 `./sql` 挂到 `/docker-entrypoint-initdb.d`
+- 但 `sql/` 下只有 `db_user` / `db_movie` / `db_session` / `db_order`，**没有 `xxl_job` 脚本**
+- admin 连不上库 → 启动失败；`order-service` 又 `depends_on` 它
+
+**思路**：从 xxl-job 2.4.1 官方仓库取 `tables_xxl_job.sql`，放 `sql/` 下，头部补 `CREATE DATABASE IF NOT EXISTS xxl_job` + `USE xxl_job`。
+
+> ⚠️ MySQL 容器的 initdb 只在**数据卷为空**时执行。因为 `mysql-data` 卷已存在，加脚本后需要 `docker compose down -v`（清库重建）或手工 `docker exec` 导入。
+
+#### 1.3 XXL-Job 执行器端完全没配 —— 定时任务永远不跑
+
+比 1.2 更隐蔽。现状：`xxl-job-core` 依赖有 ✅、`@XxlJob("orderTimeoutHandler")` 注解有 ✅、**但没有任何 `xxl.job.*` 配置，也没有 `XxlJobSpringExecutor` 的 `@Bean`**（全项目 grep 无匹配）。
+
+缺这个 Bean 的后果：执行器不会向 admin 注册，`@XxlJob` 不生效，admin 控制台「执行器管理」里看不到 order-service。**「超时释放验收」在修完这条之前不可能通过。**
+
+**思路**：写一个 `XxlJobConfig` 配置类，注册 `XxlJobSpringExecutor` Bean（`adminAddresses` / `accessToken` / `appname` / `port` / `logpath` / `logRetentionDays`），再从 Nacos 的 `order-service.yml` 读配置。`accessToken` 必须和 compose 里 admin 的 `--xxl.job.accessToken=default_token` 一致。**记下 `executor.port`**，Phase 8 给 movie-service 配时要避开。
+
+#### 1.4 三个 MyBatis-Plus 拦截器都没配
+
+以下功能现在全部静默失效（不报错，但行为不对）：
+
+- `PaginationInnerInterceptor` —— 没它 `selectPage` 不加 LIMIT，返回全量
+- `OptimisticLockerInnerInterceptor` —— 没它 `Seat` 的 `@Version` 是摆设
+- `MetaObjectHandler` —— 没它 `@TableField(fill = ...)` 不生效，`createTime`/`updateTime` 靠数据库默认值兜底
+
+**思路**：加一个 `MybatisPlusConfig`，注册 `MybatisPlusInterceptor` 并 add 两个内部拦截器；`MetaObjectHandler` 实现 `insertFill` / `updateFill`。注意拦截器要加到**每个用到 MP 的服务**能扫到的位置。
+
+---
+
+### 批次 2 — 让鉴权链路通（登录 → 网关 → 下游）
+
+#### 2.1 JWT 验签根本没做 —— `JwtUtil.java:30-36`
+
+```java
+public static Claims parseToken(String token, String secret){
+    return Jwts.parser().build().parseSignedClaims(token).getPayload();  // secret 参数从未被使用
+}
+```
+
+`secret` 形参全程没用，缺 `.verifyWith(key)`。JJWT 0.12.x 下对已签名 token 无密钥解析会抛 `UnsupportedJwtException` —— **任何 token 都解析不了**。思路：`Jwts.parser().verifyWith(Keys.hmacShaKeyFor(secret.getBytes())).build()...`。
+
+另外两个小问题：`getUserIdFromClaims` / `getUsernameFromClaims` 是**实例方法**（`:39`、`:44`），但这类是纯静态工具类，建议改成 `static` 再调用。
+
+#### 2.2 签发端密钥是 `"secret"` —— 太短，登录必然失败
+
+`UserServiceImpl.java:85` 传的字面量 `"secret"` 只有 48 bit，HS256 要求 ≥256 bit，`Keys.hmacShaKeyFor` 直接抛 `WeakKeyException`。
+
+而且 `gateway/bootstrap.yml:20` 里的 `jwt.secret` 是另一个值（`movie-ticketing-secret-key-must-be-at-least-256-bits-long!`），两边对不上。user-service 的 `bootstrap.yml` 里**根本没有 `jwt.secret` 配置项**。
+
+**思路**：把密钥收敛到 Nacos 的 `common.yml`（各服务已通过 `shared-configs` 引了它），user-service 用 `@Value("${jwt.secret}")` 注入，网关和签发端读同一个值。
+
+#### 2.3 `UserController.java:57-58` 把 token 丢了
+
+```java
+userService.login(name, password);   // 返回值（JWT）被丢弃
+return Result.success("登录成功");     // 前端拿不到 token
+```
+
+下游鉴权必然失败。思路：接住返回值放进 `Result.success(token)`。
+
+#### 2.4 AuthFilter 三处运行期 bug
+
+| 文件:行 | 问题 | 思路 |
+|---|---|---|
+| `AuthFilter.java:78` | `anthorization == null && !anthorization.startsWith("Bearer")` —— 用 `&&`，为 null 时短路不掉，继续调 `.startsWith` 直接 NPE → 网关 500 而不是 401 | 改成 `\|\|` |
+| `AuthFilter.java:90` | `claims.get("userId", String.class)` —— 但 `JwtUtil.generateToken` 把 userId 放在 **`sub`**（`JwtUtil.java:21`），claim 里没有 `"userId"`。取到 null → `Long.valueOf(null)` 抛 `NumberFormatException` → 被 `:101` 捕获 → **所有需登录接口都 401** | 改用 `claims.getSubject()` |
+| `AuthFilter.java:101` | 只 catch 了 `NumberFormatException`。token 过期/签名错抛的是 `JwtException`，会逃逸成 500 | catch 改成 `JwtException \| NumberFormatException` |
+
+> 补充确认：`AuthFilter.java:95-96` 写的是 `X-User-id` / `X-User-name`，下游读 `X-User-Id`。**这个不是问题** —— HTTP 头名大小写不敏感，Spring `@RequestHeader` 也是不敏感匹配。**不用改**。
+
+#### 2.5 数据库列名和实体字段对不上 —— `User.java:19`
+
+`User.java:19` 是 `private String name;`，但 `sql/db_user.sql:14` 的列叫 **`username`**（`:23` 还有 `uk_username` 唯一索引），实体上也没有 `@TableField("username")` 映射。
+
+MyBatis-Plus 会生成 `WHERE name = ?` / `INSERT INTO user (name,...)` → `Unknown column 'name'`。**注册、登录、current、`/{id}` 四个接口全废。**
+
+思路二选一：改实体字段名为 `username`（同时改 `UserServiceImpl` 里所有 `getName()` / `setName()` 调用），或加 `@TableField("username")` 保留 `name`。**建议前者**，跟库表对齐更省心。
+
+#### 2.6 预置账号登不进去 —— 仅需知情
+
+`db_user.sql:15,26-30` 的注释和预置哈希是 **BCrypt**，但 `UserServiceImpl.java:48,81` 用的是 `DigestUtils.md5DigestAsHex`（MD5）。所以 admin / zhangsan / lisi 三个预置账号**无法登录**。要么用注册接口建新号测试，要么把预置数据换成 MD5 哈希。
+
+---
+
+### 批次 3 — 让业务链路通（锁座 → 下单 → 支付）
+
+#### 3.1 所有自定义 SQL 都被注释掉了 ⚠️ 最致命
+
+| 文件:行 | 方法 | 现状 |
+|---|---|---|
+| `session-service/.../mapper/SessionMapper.java:23` | `updateAvailableSeats` | `@Update` 在 `:20-22` 被注释 → `BindingException` |
+| `session-service/.../mapper/SessionMapper.java:25` | `releaseSeat()` | **无 SQL、无参数**，语义上也不可能释放指定座位 |
+| `session-service/.../mapper/SeatMapper.java:12` | `lockSeat(...)` | `@Update` 被注释 |
+| `order-service/.../mapper/OrderMapper.java:19,25,31` | `findExpiredOrders` / `cancelOrder` / `payOrder` | `@Select` / `@Update` 全被注释 |
+
+全项目没有 mapper XML（已确认）。**调用即抛 `Invalid bound statement (not found)`。**
+
+> ⚠️ 特别提醒：`OrderMapper` 注释掉的 SQL 写的是 `UPDATE db_order SET ...` —— `db_order` 是**库名**不是表名，表名是 `orders`。**直接取消注释还是错的**，要改成 `orders`。
+
+#### 3.2 `SessionServiceImpl.java:162-166` 释放逻辑本身是错的
+
+```java
+for (Long seatId : seatIds){
+    redisTemplate.delete(lockKey);
+    int i = sessionMapper.releaseSeat();   // 无参、无 SQL、没用 seatId、i 也没用
+}
+```
+
+座位状态根本没被释放。思路：改成按 seatId 逐个更新 `seat` 表 `status=0, expire_time=NULL`，再恢复 `available_seats`。
+
+#### 3.3 `SessionServiceImpl.java:137-141` 把业务异常包成了 RuntimeException
+
+catch `BizException` 后 `throw new RuntimeException(e)`。但 `GlobalExceptionHandler` 只对 `BizException` 做业务码映射 —— 包装后前端收到 500「系统错误」，而不是 3002「座位已被锁定」。思路：直接 `throw e`，别包。
+
+同时 `:145-148` 的锁泄漏问题：Redis 锁只在 per-seat 的 BizException 分支释放，`updateAvailableSeats` 失败或外层回滚时锁不会被清。思路：把释放逻辑放进 `finally`，或统一在方法出口按成功/失败清理。
+
+#### 3.4 类型强转必然 ClassCastException
+
+| 文件:行 | 代码 | 问题 |
+|---|---|---|
+| `order-service/.../controller/OrderController.java:38-40` | `(Long) body.get("sessionId")` / `(List<Integer>) body.get("seatIds")` | Jackson 把小整数反序列化成 `Integer`，强转 `Long` 抛 CCE。用 `Number#longValue()` |
+| `order-service/.../service/impl/OrderServiceImpl.java:66` | `(BigDecimal) session.getData().get("price")` | Feign 把 JSON 数字解成 `Double`/`Integer`，强转 `BigDecimal` 抛 CCE |
+
+`:66` 的根因是跨服务返回类型被声明成 `Result<Map<String,Object>>`（`SessionFeignClient.java:19`），字段类型信息全丢了。**更好的思路**：让 Feign 声明成 `Result<Session>` 强类型，别再走 Map。
+
+#### 3.5 跨服务端点缺失 / 写坏
+
+- **`/api/session/confirm` 不存在**：`SessionFeignClient.java:23` 依赖它，但 `SessionController` 只实现了 `list` / `{id}` / `{id}/seats` / `lock` / `release`。调用必 404
+- **`confirmSeats` 的参数用法本身是错的**：`@PostMapping("/api/session/confirm")` 的 URL 里没有任何 `{...}` 占位符，却用了 `@PathVariable`。应该是 `@RequestParam`
+- **`/api/order/pay` 没实现**：`OrderController.java:18` 的类注释声明了它，但 `:30-74` 只有 create/cancel/getById/list/items。`OrderService.pay`（`:19`）成了死方法
+- **座位永远不会变成 SOLD**：`OrderServiceImpl.pay` 只改本地状态（`:116`），从没调 `confirmSeats` —— 和 `OrderService.java:18` 注释「通知 session 确认售出」矛盾
+
+#### 3.6 `OrderTimeoutJob` 会对同一订单 cancel 两次
+
+`OrderTimeoutJob.java:53` 和 `:65` 对同一订单调了两次 `orderService.cancel(...)`。第一次成功后 status 已非 0，第二次抛 `BizException`，被 `:67` catch 后 `throw new RuntimeException` → 整个任务失败。另外 `:31` 注入的 `OrderMapper` 没被使用（用的是 `OrderService`）。思路：去掉重复调用。
+
+#### 3.7 `MovieController.java:26` 的 `int status` + `required=false` 会 500
+
+基本类型 `int` 配 `required=false`，不传时 Spring 无法把 null 转成 `int`，抛异常。改成 `Integer` 或给 `defaultValue`。另外 `MovieServiceImpl.java:44` 用 `status != -1` 当哨兵值，但 Controller 从没传过 -1，两边语义对不上。
+
+**顺带**：`MovieController.java:41` 暴露的是 `/api/movie/category/List`（**大写 L**），而 `AuthFilter.java:43` 白名单里写的是小写 `list`。Spring 路径区分大小写 → 这条白名单永远不生效。
+
+---
+
+### 批次 4 — 回到 Phase 7 收尾（此时才真正可做）
+
+#### 4.1 Sentinel 规则（依赖大部分已就位，只差规则本身）
+
+已就位：`sentinel-dashboard` 容器（`bladex/sentinel-dashboard:1.8.6`，**镜像内端口是 8858，compose 映射 `8089:8858`**）、session/order 两个模块的 `spring-cloud-starter-alibaba-sentinel` + `sentinel-datasource-nacos` 依赖、两者 `bootstrap.yml` 里的 `transport.dashboard: sentinel-dashboard:8858` + `eager: true`。
+
+缺的：**一条规则都没有**，Nacos 里也没有规则配置。最小可用即可 —— `session-service` 的 `/api/session/lock` 限流 QPS=100；`order-service` 的 Feign 调用异常比例熔断（>50%）。规则写进 Nacos 才能重启不丢。
+
+#### 4.2 全链路联调
+
+```
+注册 → 登录 → 电影列表 → 场次 → 座位图 → 锁座 → 下单 → 支付 → 查订单
+```
+
+#### 4.3 故障演练
+
+`docker compose stop session-service` → 下单应返回降级提示而非 500 → `start` → 等 Sentinel 半开恢复 → 再下单应正常。
+
+#### 4.4 超时释放验收
+
+建单不付 → 手改 `expire_time` 到过去 → 看 XXL-Job admin 执行日志 + 确认座位 `status` 回 0、`available_seats` +1。
+
+#### 4.5 两个收尾杂项
+
+- 删 `docker-compose.yml:1` 的 `version: '3.8'`（实测确实输出 `the attribute 'version' is obsolete` 警告，见本文档 `:930` 的待办）
+- 给业务服务容器补 healthcheck —— **建议改验收口径而非现在补**：现状下收尾清单写的「9 个容器全部 healthy」无法成立，因为 `gateway` / 4 个业务服务 / `xxl-job-admin` / `sentinel-dashboard` 都没有 healthcheck。补 actuator 是 Phase 9（K8s 探针）的正经需求，现在做属于提前投入。**建议口径改成「全部 Up + 接口可通」**
+
+---
+
+### 11.6 推进顺序
+
+```
+0. 启动 Docker Desktop                        ← 当前是关的，实测连不上 daemon
+1. 批次 0 → mvn clean compile 全绿             ← 唯一硬门槛
+2. 批次 1 → docker compose up -d，服务能起来
+3. 批次 2 → 注册/登录/网关鉴权通
+4. 批次 3 → 锁座/下单/支付通
+5. 批次 4 → Phase 7 六项收尾
+```
+
+### 11.7 验收证据（每步留痕）
+
+```bash
+mvn clean package -DskipTests          # BUILD SUCCESS
+docker compose ps                      # 全部 Up
+
+# 批次 2 验收
+TOKEN=$(curl -s -X POST "http://localhost:8080/api/user/login?username=t1&password=123456" | jq -r .data)
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/user/current"   # 应返回用户信息，不是 401
+
+# 批次 3 验收
+curl "http://localhost:8080/api/session/1/seats"
+curl -X POST -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/session/lock?seatIds=1&sessionId=1"
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"sessionId":1,"movieId":1,"seatIds":[1]}' "http://localhost:8080/api/order/create"
+
+# 批次 4 验收
+docker compose stop session-service
+curl ... /api/order/create             # 应返回降级提示而非 500
+docker compose start session-service
+docker exec mt-mysql mysql -uroot -proot123 -e "UPDATE db_order.orders SET expire_time=NOW() WHERE status=0;"
+# 等下一个整分钟，看 XXL-Job admin 日志 + 座位 status 回 0
+```
+
+### 11.8 文档自身的修正项（不涉及代码）
+
+- 本文档 Phase 2/3/5/6 的「✅ 编译通过」标注未经实测，与实际不符（见 11.0），修完后应订正
+- 本文档 `:120` 的示例代码用的是 `Result.ok(data)` / `Result.fail(code, msg)`，但 `Result.java` 实际只提供 `success` / `error`。所有调用方用的都是 `success`/`error`，**没有代码问题**，属文档笔误
+- 「`OrderTimeoutJob` 该用哪个方法名」存在文档/代码分歧：`OrderMapper.java:19` 定义的是 `findExpiredOrders`，本文档 `:3121` 写的是 `selectExpiredOrders`。**以代码为准**
+- 本文档 `:929` / `:930` 的两条待办（补 xxl_job 库、修 compose 的 version 警告）在本节 1.2 / 4.5 有更详细的说明

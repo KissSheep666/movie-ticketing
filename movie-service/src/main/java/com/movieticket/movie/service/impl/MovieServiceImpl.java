@@ -1,6 +1,7 @@
 package com.movieticket.movie.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.Query;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movieticket.common.exception.BizCodeEnum;
 import com.movieticket.common.exception.BizException;
@@ -12,6 +13,7 @@ import com.movieticket.movie.service.MovieService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import javax.naming.directory.SearchResult;
 import java.util.List;
 
 @RequiredArgsConstructor
@@ -21,6 +23,7 @@ public class MovieServiceImpl implements MovieService {
     private final MovieMapper movieMapper;
 
     private final CategoryMapper categoryMapper;
+
 
     /**
      * 分页查询 根据参数 返回数据
@@ -71,5 +74,18 @@ public class MovieServiceImpl implements MovieService {
     @Override
     public List<Category> getCategoryList() {
         return categoryMapper.selectList(null);
+    }
+
+
+    public SearchResult search(String keyword,Long categoryId,Integer status,int page,int size){\
+        //根据传入关键词的区别 进行不同的查询
+        //关键词查询
+        Query keywordQuery;
+        if (keyword == null || keyword.isEmpty()){
+            //如果关键词为空 全量显示所有内容
+            keywordQuery = Query.of(q)
+
+        }
+        return null;
     }
 }
